@@ -1,24 +1,21 @@
 # Introduction
 I recently had the opportunity to showcase Snowflake at JOIN, Looker's first user conference. I used my time to highlight a few Snowflake features that I find particularly useful, as someone who does analytics. The presentation demonstrated simultaneous workloads that share the same data as well as analytically intensive SQL patterns against large-scale, semi-structured data.
 
-I thought I'd refactor my presentation as a series of blog entries to share some useful insights and interesting patterns with a broader audience. I'm going to step through how to incorporate sentiment analysis as well as tweet similarity into an interactive model using both Looker and Snowflake. (Note: if you haven't read our [previous blog](https://www.snowflake.net/blog/happy-tweet-sad-tweet-building-naive-bayes-classifier-sql) on sentiment analysis using Naïve Bayes, I highly recommend you do so.)
+I thought I'd refactor my presentation as a series of blog entries to share some useful insights and interesting patterns with a broader audience. In Part 1, I'm going to build an interactive model that analyzes tweet similarity using Snowflake and Looker. In Part 2, I'm going to step through simultaneous workloads using sentiment analysis and our tweet similarity. (Note: if you haven't read our [previous blog](https://www.snowflake.net/blog/happy-tweet-sad-tweet-building-naive-bayes-classifier-sql) on sentiment analysis using Naïve Bayes, I highly recommend you do so.)
 
-# Part 1 - Simultaneous Workloads, Shared Data
-N/A
-
-# Part 2 - Tweet Similarity
+# Part 1 - Tweet Similarity
 ## Overview
-In this article, we'll compare the language in various documents to see how similar they are to one another. This is not just an academic exercise; document similarity has many interesting real-world applications. For example, a law firm may need to parse thousands or even millions of documents during discovery to build a cohesive paper trail that might otherwise be impractical to do by hand. Alternatively, an e-commerce store might want to mine product reviews to identify people with similar preferences or feelings about specific products to build or improve a recommendation engine. To keep things simple, we'll use Twitter data. It's relatively simple to demonstrate on (no more than 140 characters), it's general enough to be understood by most people, and it's just kind of fun. We'll start by going over a few basic natural-language-processing techniques which we'll use to conduct this analysis, then we'll step through the implementation of these steps, one-by-one.
+In this article, we'll compare the language in various documents to see how similar they are to one another. This is not just an academic exercise; document similarity has many interesting real-world applications. For example, a law firm may need to parse thousands or even millions of documents during discovery to build a cohesive paper trail that might otherwise be impractical to do by hand. Alternatively, an e-commerce company might want to mine product reviews to identify people with similar preferences or feelings about specific products to build or improve a recommendation engine. To keep things simple, we'll use Twitter data. It's relatively simple to demonstrate on (no more than 140 characters); it's general enough to be understood by most people; and it's just kind of fun. We'll start by going over a few basic natural-language-processing techniques which we'll use to conduct this analysis, then we'll see them in action using Snowflake as the backend and Looker as the front end. (Note: the implementation in its entirety  is available on [Github]().)
 
-There are a number of approaches and considerations when determining document similarity. To avoid a deep dive into natural language processing from which we may never escape (or, more likely, not be able to cover in a few blog posts), let's focus on some simple methods. We'll use [cosine similarity](https://en.wikipedia.org/wiki/Cosine_similarity) to determine the similarity of tweets. We'll familiarize ourselves with constructing vectors that capture our tweets using a [bag-of-words](https://en.wikipedia.org/wiki/Bag-of-words_model) approach. Lastly, we'll scale our results so that uncommon words in our documents don't get burried by more commonly occuring words using [inverse document frequency](https://en.wikipedia.org/wiki/Tf%E2%80%93idf).
+There are a number of approaches and considerations when determining document similarity. To avoid a deep dive into natural language processing from which we may never escape (or, more likely, not be able to cover in a single blog post), let's focus on some simple methods. We'll use [cosine similarity](https://en.wikipedia.org/wiki/Cosine_similarity) to determine the similarity of tweets. We'll familiarize ourselves with constructing vectors that capture our tweets using a [bag-of-words](https://en.wikipedia.org/wiki/Bag-of-words_model) approach. Lastly, we'll scale our results so that uncommon words in our documents don't get buried by more commonly occurring words using [inverse document frequency](https://en.wikipedia.org/wiki/Tf%E2%80%93idf).
 
-## A few NLP Basics
+## A Few NLP Basics
 ### Cosine Similarity
 Consider two non-zero vectors, $\vec{a}$ and $\vec{b}$. The cosine of the angle $\theta$ between these two vectors is indicative of similar or dissimilar orientation in the n-dimensional space that they occupy. In our case, the metric $\cos(\theta)$ lies on the interval $[0, 1]$, where $0$ indicates the vectors are orthogonal or perfectly dissimilar, and $1$ indicates the vectors are identical. We use the following formula to calculate cosine similarity of the vectors $\vec{a}$ and $\vec{b}$:
 
-$$\large \cos({\theta}) = \frac{\vec{a} \cdot \vec{b}}{\|\vec{a}\|\|\vec{b}\|} = \frac{\sum_{i=1}^{n}a_{i}b_{i}}{\sqrt{\sum_{i=1}^{n}a_{i}^{2}} \sqrt{\sum _{i=1}^{n}b_{i}^{2}}}$$
+$$\large \cos({\theta}) = \frac{\vec{a} \cdot \vec{b}}{\|\vec{a}\|\cdot\|\vec{b}\|} = \frac{\sum_{i=1}^{n}a_{i}b_{i}}{\sqrt{\sum_{i=1}^{n}a_{i}^{2}} \sqrt{\sum _{i=1}^{n}b_{i}^{2}}}$$
 
-As the angle between these two vectors approaches $0^{\circ}$, the similarity increases; as the angle approaches 90º, they become more dissimilar.
+In Figure 2, we can see that as the angle between these two vectors approaches $0^{\circ}$, the similarity increases; as the angle approaches 90º, they become more dissimilar.
 
 ![image](https://cloud.githubusercontent.com/assets/2467394/20046852/41be8b7a-a463-11e6-917f-89db6021a23a.png)
 
@@ -46,25 +43,29 @@ Let's suppose that we had a second document already in a bag-of-words form:
 document_2 = [(a, 1), ..., (aardvark, 1), (aardwolf, 0), ..., (and, 0), (andalusia, 0), ..., (spiders, 1), ..., (zygote, 0)]]
 ```
 
-Recall that our similarity metric will ultimately rely on an inner product between our document vectors. Notice, also, that if we join our two vectors on the word indexes and perform our element-wise multipliation, that any zero element cancels out a corresponding non-zero element (_e.g._, multiplying the element for "aardvark" in document 1 with that of document 2 yields 0). There are two implications here: First, we can store our data in a sparse format. In other words, we just need the actual words in our document and the number of times each occurs. All of the omitted words from our corpus are assumed to occur 0 times in our document. The second implication is that, when comparing two vectors, we only care about the elements that return from an `inner join`—_i.e._, we only care about words that appear in both documents. Considering this, our first document's representation might look like this:
+Recall that our similarity metric will ultimately rely on an inner product between our document vectors. Notice, also, that if we join our two vectors on the word indexes and perform our element-wise multipliation, that any zero element cancels out a corresponding non-zero element (_e.g._, multiplying the element for "aardvark" in document 1 with that of document 2 yields 0). 
+
+There are two implications here: First, we can store our data in a sparse format. In other words, we just need the actual words in our document and the number of times each occurs. All of the omitted words from our corpus are assumed to occur 0 times in our document. The second implication is that, when comparing two vectors, we only care about the elements that return from an inner join—_i.e._, we only care about words that appear in both documents. Considering this, our first document's representation might look like this:
 
 ```
 document_1 = [(a, 1), (avoid, 1), (biological, 1), ..., (spiders, 2), ..., (understand, 1)]
 ```
 
-Or, if you prefer [table 1]:
+Or, if you prefer to think of things in tabular format:
+
 |document_id|word|occurrences|
 |---|---|---|
 |1|and|1|
 |1|avoid|1|
 |1|biological|1|
-|..|...|..|
-|1|spiders|2|
+|...|...|...|
+|1|spiders|2
+|
 |...|...|...|
 |1|understand|1|
 
 ### Term Frequency - Inverse Document Frequency (tf-idf)
-Before we start making any calculations, we should consider the lack of weighting in this scheme so far. As we can see, there are many words that appear in many or most documents. If we were to proceed without addressing this, these commonly encountered words might dominate our similarity metric, leading us to conclude that many documents are similar, when, in fact, they share little in common outside of these frequently occurring words. To address this, we may want to add a penalty to our term freqency (_i.e._, the "occurrences" from above). There are a few approaches we can take here, but we'll rely on the following to keep matters simple:
+Before we start making any calculations, we should consider the lack of weighting in this scheme so far. As we can see, there are many words that appear in many or most documents. If we were to proceed without addressing this, these commonly encountered words might dominate our similarity metric, leading us to conclude that many documents are similar, when, in fact, they share little in common outside of these frequently occurring words. To address this, we may want to add a penalty to our term frequency (_i.e._, the "occurrences" from above). There are a few approaches we can take here, but we'll rely on the following to keep matters simple:
 
 $$\large \text{idf}(t, D) = \log\frac{N}{1 + \{d \; \in \; D \;: \;t \; \in \; d\}}$$
 
@@ -75,7 +76,7 @@ With the above tools in hand, we have all of our building blocks to calculate do
 
 ## Implementation
 ### Twitter Data
-Let's get a feel of what our Twitter data actually look like. The Twitter API returns a JSON response that's fairly rich and complex (see below). In our table, we simply store two columns: the datetime of the tweet (`created_at`) and the actual JSON response (`tweet`) in its entirety. For the `tweet` column, Snowflake is making use of its [variant](linktodocs) data type, which columnarizes the data upon ingestion, improving query times against semi-structured data.
+Let's get a feel of what our Twitter data actually look like. The Twitter API returns a JSON response that's fairly rich and complex (see below). In our table, we simply store two columns: the datetime of the tweet (`created_at`) and the actual JSON response (`tweet`) in its entirety. For the `tweet` column, Snowflake is making use of its [variant](linktodocs) data type, which columnarizes the data upon ingestion, improving query performance against semi-structured data.
 
 ```
 {
@@ -179,7 +180,11 @@ yields:
 |792960253834858496|Hey! Everything's fine.|en|SamTheMan|[{ "indices": [ 62, 70 ], "text": "nofilter" } ]|nofilter|
 
 ### Preliminaries
-There are a few things we need to do in order to get things rolling. First, we need two [JavaScript UDFs](https://docs.snowflake.net/manuals/sql-reference/udf-js.html). The first, `split_text`, is detailed in [Martin's blog on Tweet Sentiment](https://www.snowflake.net/blog/happy-tweet-sad-tweet-building-naive-bayes-classifier-sql), so I won't go over that. The second, `word_count`, takes an array as input and returns an array of key-value pairs, where the key is the word and the value is the number of times that word appears in the document.
+There are a few things we need to do in order to get things rolling. 
+
+First, we will make use of Looker's [derived tables](https://looker.com/docs/data-modeling/learning-lookml/derived-tables). For those who are unfamiliar, these will effectively string together a series of common table expressions (CTEs). There's some unique syntax involved. For instance, when we embed `${bag_of_words.SQL_TABLE_NAME}` in a block of SQL, Looker knows to replace this with a reference to the previously defined CTE, `bag_of_words`.
+
+Second, we need two [JavaScript UDFs](https://docs.snowflake.net/manuals/sql-reference/udf-js.html). The first, `split_text`, is detailed in [Martin's blog on Tweet Sentiment](https://www.snowflake.net/blog/happy-tweet-sad-tweet-building-naive-bayes-classifier-sql), so I won't go over that. The second, `word_count`, takes an array as input and returns an array of key-value pairs, where the key is the word and the value is the number of times that word appears in the document—effectively, our bag of words.
 
 ```sql
 create or replace function word_count(WORDS variant)
@@ -205,7 +210,7 @@ yields:
 { "bar": 1, "baz": 1, "foo": 2, "for": 1, "friends": 1, "good": 1, "measure": 1, "my": 1 }
 ```
 
-We'll need to periodically compute the total number of documents/tweets in the data set, which is used later for our inverse document frequency calculation:
+Third, we'll need to periodically compute the total number of documents or tweets in the data set, which is used later for our inverse document frequency calculation:
 ```sql
 - view: total_documents
   derived_table:
@@ -215,7 +220,7 @@ We'll need to periodically compute the total number of documents/tweets in the d
   sql_trigger_value: select current_date
 ```
 
-And we'll need to periodically compute stats about our corpus:
+And lastly we'll need to periodically compute stats about our corpus:
 ```sql
 - view: corpus
   derived_table:
@@ -231,19 +236,17 @@ And we'll need to periodically compute stats about our corpus:
   sql_trigger_value: select current_date
 ```
 
-Note a few things:
+Note a few things about the above SQL:
 - We're only analyzing English-language tweets.
-- We're removing common "stop words" from our analysis (see the subquery referencing the table `stop_list`).
-- The `corpus` transformation makes use of a lateral view, which may be unfamiliar depending on the SQL dialects with which you are familiar.
-- We've set these derived tables to materialize nightly. 
-
-We've opted to materialize the two transformations using Looker's persistent derived tables because (1) our analysis doesn't hinge on up-to-the-minute statistics on the corpus and (2) these would be computationally impractical to include in our series of transformations that are computed on the fly.
+- We're removing common "stop words" from our analysis.
+- The `corpus` transformation makes use of a [lateral view](https://docs.snowflake.net/manuals/sql-reference/functions/flatten.html), which may be unfamiliar depending on the SQL dialects you have used in the past.
+- We've opted set these derived tables to materialize nightly because (1) our analysis doesn't hinge on up-to-the-minute statistics on the corpus and (2) these would be computationally impractical to include in our series of transformations that are computed on the fly.
 
 ### An Interactive Model
-For the final steps, we'll place a series dependent SQL transformations into Looker derived tables. For those who are unfamiliar, these will effectively string together a series of common table expressions (CTEs). There's just a little unqiue syntax involved. When we use `${bag_of_words.SQL_TABLE_NAME}`, Looker will replace this with a reference to the CTE, `bag_of_words`.
+For the final steps, we'll place a series dependent SQL transformations into Looker derived tables. 
 
 ##### Step 1. Calculate the bag of words for all tweets.
-This step will yield a result set that looks like [table 1](link) presented in the bag-of-words section.
+This step will yield a result set that looks like [Table 1]() presented in the bag-of-words section.
 ```sql
 - view: bag_of_words
   derived_table:
@@ -256,10 +259,11 @@ This step will yield a result set that looks like [table 1](link) presented in t
       where key::string not in (select this from stop_list)
       and tweet:lang::string = 'en'
   fields:
-  ```
+```
+
 ##### Step 2. Join in the corpus, mapping each word to its inverse document frequency.
- For each word in each tweet, we join to the corpus to bring in the inverse document frequency. We also use Looker's cascading derived table syntax to reference our bag of words CTE as well as the corpus materialized view.
-  ```sql
+ For each word in each tweet, we join to the corpus to bring in the inverse document frequency.
+```sql
 - view: similarity_prep
   derived_table:
     sql: |
@@ -270,6 +274,7 @@ This step will yield a result set that looks like [table 1](link) presented in t
       on bag_of_words.word = corpus.word
   fields:
 ```
+
 ##### Step 3. Calculate cosine similarity between filtered tweet and all others.
 The last transformation we need will take a `tweet_id` as filter input, inject that into the SQL, and compute the cosine similarity of that tweet with all others in the data set. This gives us a result set that we can expose and explore in Looker.
 ```sql
