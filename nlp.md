@@ -177,7 +177,7 @@ yields:
 
 |id|body|language|screen_name|hashtags|first_hashtag|
 |---|---|---|---|---|---|
-|792960253834858496|Hey! Everything's fine.|en|SamTheMan|[{ "indices": [ 62, 70 ], "text": "nofilter" } ]|nofilter|
+|792960253834858496|Hey! Everything's fine.|en|SamTheMan|`[{ "indices": [ 62, 70 ], "text": "nofilter" } ]`|nofilter|
 
 ### Preliminaries
 There are a few things we need to do in order to get things rolling. 
